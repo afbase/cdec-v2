@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
 use clap::Parser;
-use csv::{Reader, Writer};
+use csv::{Reader, StringRecord, Writer};
+use log::{debug, error, info, log_enabled, Level};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -152,18 +153,37 @@ async fn fetch_data(
 
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
+    env_logger::init();
     let args = Args::parse();
-
+    info!("start the program!");
+    //ID,DAM,LAKE,STREAM,CAPACITY (AF),YEAR FILL
+    let headers = StringRecord::from(vec![
+        "ID",
+        "DAM",
+        "LAKE",
+        "STREAM",
+        "CAPACITY (AF)",
+        "YEAR FILL",
+    ]);
     let reservoir_data = std::fs::File::open(args.reservoir_data)?;
-    let reservoirs: HashMap<String, Reservoir> = csv::Reader::from_reader(reservoir_data)
+    let mut reservoir_reader = csv::Reader::from_reader(reservoir_data);
+    let reservoirs: HashMap<String, Reservoir> = reservoir_reader
         .deserialize()
         .filter_map(|result| result.ok())
         .map(|res: Reservoir| (res.id.clone(), res))
         .collect();
+    // let reservoirs: HashMap<String, Reservoir> = csv::Reader::from_reader(reservoir_data)
+    //     .deserialize()
+    //     .filter_map(|result| result.ok())
+    //     .map(|res: Reservoir| (res.id.clone(), res))
+    //     .collect();
+    info!("reservoir count: {}", reservoirs.len());
 
     let station_ids = if args.all_reservoirs {
+        info!("found all reservoirs flag");
         reservoirs.keys().cloned().collect::<Vec<_>>()
     } else {
+        info!("reservoirs to parse: {}", args.reservoir.clone().unwrap());
         args.reservoir
             .unwrap()
             .split(',')
@@ -176,18 +196,16 @@ async fn main() -> Result<(), MainError> {
         let client = Client::new();
         let start_date = args.start_date.clone();
         let end_date = args.end_date.clone();
-        join_set.spawn(
-            async move {
-                fetch_data(&client, &station_id, &start_date, &end_date)
-                    .await
-                    .map_err(MainError::from)
-            }
-        );
+        join_set.spawn(async move {
+            info!("Fetching data for reservoir: {}", &station_id);
+            fetch_data(&client, &station_id, &start_date, &end_date)
+                .await
+                .map_err(MainError::from)
+        });
     }
 
     let mut data: Vec<CdecData> = Vec::new();
     while let Some(res) = join_set.join_next().await {
-        // let res1 = res?;
         data.extend(res??);
     }
 
@@ -195,6 +213,7 @@ async fn main() -> Result<(), MainError> {
         if let Some(reservoir) = reservoirs.get(&d.station_id) {
             if d.value > (reservoir.capacity as f64 * 1.01) as u32 {
                 d.value = reservoir.capacity;
+                info!("Sanitized the data for {:?}", d);
             }
         }
     });
@@ -210,6 +229,7 @@ async fn main() -> Result<(), MainError> {
         wtr.serialize(d)?;
     }
     wtr.flush()?;
+    info!("wrote to output file!");
 
     Ok(())
 }
